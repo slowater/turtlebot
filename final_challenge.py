@@ -116,6 +116,20 @@ def checkPosWithBias(Pos, goal, bias):
     else:
         return False
 
+class PIDController:
+    def __init__(self, kp, ki, kd):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.previous_error = 0
+        self.integral = 0
+
+    def update(self, error, delta_time):
+        self.integral += error * delta_time
+        derivative = (error - self.previous_error) / delta_time
+        output = self.kp * error + self.ki * self.integral + self.kd * derivative
+        self.previous_error = error
+        return output
 
 def navigation(agent, goal, schedule):
     """
@@ -135,8 +149,15 @@ def navigation(agent, goal, schedule):
     """
     basePos = p.getBasePositionAndOrientation(agent)
     index = 0
-    dis_th = 0.4
+    dis_th = 0.1
+    prev_x = basePos[0][0]
+    prev_y = basePos[0][1]
+    pid_linear = PIDController(10, 0, 0.1)  # Tune these parameters for linear velocity
+    pid_angular = PIDController(20, 0, 0.05)  # Tune these parameters for angular velocity
+    last_time = time.time()
     while(not checkPosWithBias(basePos[0], goal, dis_th)):
+        current_time = time.time()
+        delta_time = current_time - last_time
         basePos = p.getBasePositionAndOrientation(agent)
         next = [schedule[index]["x"], schedule[index]["y"]]
         if(checkPosWithBias(basePos[0], next, dis_th)):
@@ -160,15 +181,38 @@ def navigation(agent, goal, schedule):
             theta = theta + 2 * math.pi
         elif theta > 0 and abs(theta - 2 * math.pi) < theta:
             theta = theta - 2 * math.pi
-
+ 
         current = [x, y]
         distance = math.dist(current, next)
-        k1, k2, A = 20, 5, 20
-        linear = k1 * math.cos(theta)
-        angular = k2 * theta
 
-        rightWheelVelocity = linear + angular
-        leftWheelVelocity = linear - angular
+        print("init_pose", str(agent), str([x, y]))
+        print("goal_pose", str(agent), str(goal))
+
+        # Update PID controllers
+        linear_error = distance
+        angular_error = theta
+        linear_velocity = pid_linear.update(linear_error, delta_time)
+        angular_velocity = pid_angular.update(angular_error, delta_time)
+
+        rightWheelVelocity = linear_velocity + angular_velocity
+        leftWheelVelocity = linear_velocity - angular_velocity
+
+        # k1, k2, A = 10, 8, 20
+        # linear = k1 * distance * math.cos(theta)
+        # angular = k2 * theta
+
+        # Calculate color based on linear velocity
+        max_linear_velocity = 10
+        velocity_color = linear_velocity / max_linear_velocity
+        # velocity_color = linear / max_linear_velocity
+        color = [velocity_color, 1 - velocity_color, 0]  # RGB: Varying from red to green
+
+        # Draw the line segment
+        p.addUserDebugLine([prev_x, prev_y, 0.01], [current[0], current[1], 0.01], lineColorRGB=color, lineWidth=10)
+        prev_x, prev_y = current[0], current[1]
+
+        # rightWheelVelocity = linear + angular
+        # leftWheelVelocity = linear - angular
 
         p.setJointMotorControl2(agent, 0, p.VELOCITY_CONTROL, targetVelocity=leftWheelVelocity, force=1)
         p.setJointMotorControl2(agent, 1, p.VELOCITY_CONTROL, targetVelocity=rightWheelVelocity, force=1)
@@ -196,6 +240,38 @@ def run(agents, goals, schedule):
 
     for t in threads:
         t.join()
+
+def optimize_path(path):
+    """
+    Optimizes the path by skipping intermediate coordinates in a straight line.
+
+    Args:
+    path (dict): A dictionary where keys are agent IDs and values are lists of coordinates.
+
+    Returns:
+    dict: Optimized path dictionary.
+    """
+    def is_straight_line(p1, p2, p3):
+        """
+        Checks if three points are in a straight line (collinear).
+        """
+        # Collinearity for points (x1, y1), (x2, y2), (x3, y3) is given by:
+        # (y2 - y1)*(x3 - x2) == (y3 - y2)*(x2 - x1)
+        return (p2['y'] - p1['y']) * (p3['x'] - p2['x']) == (p3['y'] - p2['y']) * (p2['x'] - p1['x'])
+
+    optimized_path = {}
+    for agent, waypoints in path.items():
+        optimized_waypoints = []
+        i = 0
+        while i < len(waypoints):
+            optimized_waypoints.append(waypoints[i])
+            # Look ahead to find the next 'turn' in the path
+            while i + 2 < len(waypoints) and is_straight_line(waypoints[i], waypoints[i + 1], waypoints[i + 2]):
+                i += 1
+            i += 1
+        optimized_path[agent] = optimized_waypoints
+
+    return optimized_path
 
 
 # physics_client = p.connect(p.GUI, options='--width=1920 --height=1080 --mp4=multi_3.mp4 --mp4fps=30')
@@ -230,6 +306,12 @@ cbs_schedule = read_cbs_output("./final_challenge/cbs_output.yaml")
 box_id_to_schedule = {}
 for name, value in cbs_schedule.items():
     box_id_to_schedule[agent_name_to_box_id[name]] = value
+# print(box_id_to_goal)
+# print(box_id_to_schedule)
 
-run(agent_box_ids, box_id_to_goal, box_id_to_schedule)
+optimized_path = optimize_path(box_id_to_schedule)
+print(optimized_path)
+sol = {71: [{'t': 0, 'x': 9, 'y': 9}, {'t': 5, 'x': 4, 'y': 9}, {'t': 7, 'x': 4, 'y': 7}, {'t': 11, 'x': 8, 'y': 7}, {'t': 13, 'x': 8, 'y': 5}, {'t': 15, 'x': 6, 'y': 5}, {'t': 17, 'x': 6, 'y': 3}, {'t': 18, 'x': 7, 'y': 3}, {'t': 20, 'x': 7, 'y': 1}, {'t': 21, 'x': 6, 'y': 1}, {'t': 22, 'x': 6, 'y': 0}], 72: [{'t': 0, 'x': 0, 'y': 9}, {'t': 3, 'x': 3, 'y': 9}, {'t': 5, 'x': 3, 'y': 7}, {'t': 6, 'x': 2, 'y': 7}, {'t': 8, 'x': 2, 'y': 5}, {'t': 11, 'x': 5, 'y': 5}, {'t': 13, 'x': 5, 'y': 3}, {'t': 15, 'x': 7, 'y': 3}, {'t': 17, 'x': 7, 'y': 1}, {'t': 21, 'x': 3, 'y': 1}, {'t': 22, 'x': 3, 'y': 0}]}
+
+run(agent_box_ids, box_id_to_goal, optimized_path)
 time.sleep(2)
